@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Pac-Man Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: Arial, sans-serif;
+        }
+        
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100vh;
+        }
+        
+        .game-ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 18px;
+            font-family: 'Courier New', monospace;
+            z-index: 10;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
+        }
+        
+        .game-status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: yellow;
+            font-size: 24px;
+            font-weight: bold;
+            text-align: center;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 20;
+            display: none;
+        }
+        
+        .game-status button {
+            background-color: #FFCC00;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            margin-top: 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 16px;
+        }
+        
+        .game-status button:hover {
+            background-color: #FFD700;
+        }
+        
+        .camera-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            border: 1px solid white;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-ui">
+        <div id="score">Score: 0</div>
+        <div id="level">Level: 1</div>
+        <div id="lives">Lives: 3</div>
+    </div>
+    
+    <div id="gameStatus" class="game-status">
+        <div id="statusText">Press Start to Play</div>
+        <button id="startButton">Start Game</button>
+    </div>
+    
+    <button id="cameraToggle" class="camera-toggle">Toggle Camera View</button>
+    
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Import Three.js from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+    
+    <script>
+        // Game Constants and Variables
+        const CELL_SIZE = 1; // Unit size in 3D space
+        const WALL_HEIGHT = 1;
+        const ROWS = 31;
+        const COLS = 28;
+        const DOT_SIZE = 0.2;
+        const POWER_PELLET_SIZE = 0.4;
+        const PACMAN_SPEED = 0.05;
+        const GHOST_SPEED = 0.04;
+        
+        // Game state
+        let gameState = {
+            score: 0,
+            level: 1,
+            lives: 3,
+            status: 'initial', // initial, playing, paused, game-over, level-complete
+            remainingDots: 0,
+            powerPelletActive: false,
+            powerPelletTimer: 0,
+            ghostsEaten: 0,
+            cameraMode: 'thirdPerson' // 'thirdPerson', 'firstPerson', 'overhead'
+        };
+        
+        // Direction constants
+        const DIRECTIONS = {
+            UP: { x: 0, z: -1 },
+            DOWN: { x: 0, z: 1 },
+            LEFT: { x: -1, z: 0 },
+            RIGHT: { x: 1, z: 0 },
+            NONE: { x: 0, z: 0 }
+        };
+        
+        // Colors
+        const COLORS = {
+            MAZE: 0x2121DE,
+            DOT: 0xFCB5FF,
+            POWER_PELLET: 0xFCB5FF,
+            PACMAN: 0xFFFF00,
+            GHOST_BLINKY: 0xFF0000, // Red
+            GHOST_PINKY: 0xFFB8FF,  // Pink
+            GHOST_INKY: 0x00FFFF,   // Cyan
+            GHOST_CLYDE: 0xFFB852,  // Orange
+            GHOST_FRIGHTENED: 0x2121DE, // Blue
+            GHOST_EATEN: 0xFFFFFF,   // White eyes only
+            FLOOR: 0x000033
+        };
+        
+        // Three.js variables
+        let scene, camera, renderer, thirdPersonCamera, firstPersonCamera, overheadCamera;
+        let pacmanMesh, pacmanMouthMesh;
+        let ghostMeshes = [];
+        let dotMeshes = [];
+        let powerPelletMeshes = [];
+        let wallMeshes = [];
+        
+        // Pac-Man entity
+        const pacman = {
+            x: 14 * CELL_SIZE,
+            z: 23 * CELL_SIZE,
+            speed: PACMAN_SPEED,
+            direction: DIRECTIONS.NONE,
+            nextDirection: DIRECTIONS.NONE,
+            mouthAngle: 0.2,
+            mouthDirection: 0.1,
+            animationSpeed: 0.15,
+            mesh: null,
+            mouthMesh: null
+        };
+        
+        // Ghost class
+        class Ghost {
+            constructor(name, color, x, z, strategy) {
+                this.name = name;
+                this.color = color;
+                this.x = x;
+                this.z = z;
+                this.startX = x;
+                this.startZ = z;
+                this.direction = DIRECTIONS.LEFT;
+                this.nextDirection = DIRECTIONS.LEFT;
+                this.speed = GHOST_SPEED;
+                this.strategy = strategy;
+                this.mode = 'scatter'; // scatter, chase, frightened, eaten
+                this.scatterTimer = 0;
+                this.chaseTimer = 0;
+                this.frightenedTimer = 0;
+                this.blinkCounter = 0;
+                this.inGhostHouse = name !== 'blinky';
+                this.exitTimer = name === 'pinky' ? 3 : name === 'inky' ? 6 : name === 'clyde' ? 9 : 0;
+                this.eyesDirection = DIRECTIONS.LEFT;
+                this.mesh = null;
+                this.eyeMeshes = [];
+                this.pupilMeshes = [];
+            }
+            
+            reset() {
+                this.x = this.startX;
+                this.z = this.startZ;
+                this.direction = DIRECTIONS.LEFT;
+                this.nextDirection = DIRECTIONS.LEFT;
+                this.mode = 'scatter';
+                this.inGhostHouse = this.name !== 'blinky';
+                this.exitTimer = this.name === 'pinky' ? 3 : this.name === 'inky' ? 6 : this.name === 'clyde' ? 9 : 0;
+                
+                // Update mesh position
+                if (this.mesh) {
+                    this.mesh.position.x = this.x;
+                    this.mesh.position.z = this.z;
+                }
+            }
+            
+            canExit() {
+                if (this.exitTimer > 0) {
+                    this.exitTimer -= 1/60;
+                    return false;
+                }
+                return true;
+            }
+            
+            exitGhostHouse() {
+                if (this.inGhostHouse && this.canExit()) {
+                    // Move to the exit position first
+                    const ghostHouseExit = { x: 13.5 * CELL_SIZE, z: 11 * CELL_SIZE };
+                    
+                    // If close to the exit, move up and exit the ghost house
+                    if (Math.abs(this.x - ghostHouseExit.x) < 0.1 && Math.abs(this.z - ghostHouseExit.z) < 0.1) {
+                        this.x = ghostHouseExit.x;
+                        this.z = ghostHouseExit.z;
+                        this.direction = DIRECTIONS.UP;
+                        this.nextDirection = DIRECTIONS.UP;
+                        this.inGhostHouse = false;
+                        return true;
+                    }
+                    
+                    // Move toward the exit
+                    if (this.x < ghostHouseExit.x) {
+                        this.x += this.speed;
+                        this.direction = DIRECTIONS.RIGHT;
+                        this.eyesDirection = DIRECTIONS.RIGHT;
+                    } else if (this.x > ghostHouseExit.x) {
+                        this.x -= this.speed;
+                        this.direction = DIRECTIONS.LEFT;
+                        this.eyesDirection = DIRECTIONS.LEFT;
+                    }
+                    
+                    if (this.z < ghostHouseExit.z) {
+                        this.z += this.speed;
+                        this.direction = DIRECTIONS.DOWN;
+                        this.eyesDirection = DIRECTIONS.DOWN;
+                    } else if (this.z > ghostHouseExit.z) {
+                        this.z -= this.speed;
+                        this.direction = DIRECTIONS.UP;
+                        this.eyesDirection = DIRECTIONS.UP;
+                    }
+                    
+                    // Update mesh position
+                    if (this.mesh) {
+                        this.mesh.position.x = this.x;
+                        this.mesh.position.z = this.z;
+                        this.updateEyePositions();
+                    }
+                    
+                    return true;
+                }
+                return false;
+            }
+            
+            switchMode(newMode) {
+                if (this.mode !== 'eaten' || newMode === 'chase' || newMode === 'scatter') {
+                    // If not in eaten mode or switching to chase/scatter, apply the new mode
+                    this.mode = newMode;
+                    
+                    // Update ghost appearance based on mode
+                    this.updateAppearance();
+                    
+                    // Reverse direction when switching between chase and scatter
+                    if (newMode === 'chase' || newMode === 'scatter') {
+                        this.reverseDirection();
+                    }
+                }
+            }
+            
+            updateAppearance() {
+                if (!this.mesh) return;
+                
+                if (this.mode === 'frightened') {
+                    if (this.frightenedTimer < 2 && Math.floor(this.blinkCounter) % 2 === 0) {
+                        this.mesh.material.color.setHex(0xFFFFFF);
+                    } else {
+                        this.mesh.material.color.setHex(COLORS.GHOST_FRIGHTENED);
+                    }
+                } else if (this.mode === 'eaten') {
+                    // Make body transparent when eaten
+                    this.mesh.material.transparent = true;
+                    this.mesh.material.opacity = 0.3;
+                } else {
+                    // Normal color
+                    this.mesh.material.color.setHex(this.color);
+                    this.mesh.material.transparent = false;
+                    this.mesh.material.opacity = 1;
+                }
+            }
+            
+            reverseDirection() {
+                if (this.direction === DIRECTIONS.UP) this.nextDirection = DIRECTIONS.DOWN;
+                else if (this.direction === DIRECTIONS.DOWN) this.nextDirection = DIRECTIONS.UP;
+                else if (this.direction === DIRECTIONS.LEFT) this.nextDirection = DIRECTIONS.RIGHT;
+                else if (this.direction === DIRECTIONS.RIGHT) this.nextDirection = DIRECTIONS.LEFT;
+            }
+            
+            move(maze, pacman) {
+                // If in ghost house, handle exit logic
+                if (this.inGhostHouse) {
+                    this.exitGhostHouse();
+                    return;
+                }
+                
+                // Handle mode timers
+                if (this.mode === 'scatter' && this.scatterTimer > 0) {
+                    this.scatterTimer -= 1/60;
+                    if (this.scatterTimer <= 0) {
+                        this.switchMode('chase');
+                        this.chaseTimer = 20; // 20 seconds of chase
+                    }
+                } else if (this.mode === 'chase' && this.chaseTimer > 0) {
+                    this.chaseTimer -= 1/60;
+                    if (this.chaseTimer <= 0) {
+                        this.switchMode('scatter');
+                        this.scatterTimer = 7; // 7 seconds of scatter
+                    }
+                } else if (this.mode === 'frightened' && this.frightenedTimer > 0) {
+                    this.frightenedTimer -= 1/60;
+                    
+                    // Blink near the end of frightened mode
+                    if (this.frightenedTimer < 2) {
+                        this.blinkCounter += 0.1;
+                        this.updateAppearance();
+                    }
+                    
+                    if (this.frightenedTimer <= 0) {
+                        this.switchMode(this.scatterTimer > 0 ? 'scatter' : 'chase');
+                    }
+                }
+                
+                // Handle movement based on current position
+                let speed = this.speed;
+                
+                // Adjust speed based on mode
+                if (this.mode === 'frightened') {
+                    speed = this.speed * 0.5;
+                } else if (this.mode === 'eaten') {
+                    speed = this.speed * 1.5;
+                }
+                
+                // Adjust speed for level difficulty
+                speed *= (1 + (gameState.level - 1) * 0.1); // 10% increase per level
+                
+                // Move in current direction
+                let newX = this.x + this.direction.x * speed;
+                let newZ = this.z + this.direction.z * speed;
+                
+                // Get current and next cell positions
+                const currentCell = {
+                    col: Math.floor(this.x / CELL_SIZE),
+                    row: Math.floor(this.z / CELL_SIZE)
+                };
+                
+                const nextCell = {
+                    col: Math.floor(newX / CELL_SIZE),
+                    row: Math.floor(newZ / CELL_SIZE)
+                };
+                
+                // Handle tunnel warping
+                if (nextCell.col < 0) newX = COLS * CELL_SIZE;
+                if (nextCell.col >= COLS) newX = -CELL_SIZE;
+                
+                // Check if centered on a cell for direction changes
+                const isCentered = (
+                    Math.abs((this.x % CELL_SIZE) - CELL_SIZE / 2) < speed &&
+                    Math.abs((this.z % CELL_SIZE) - CELL_SIZE / 2) < speed
+                );
+                
+                if (isCentered) {
+                    // Center exactly on the cell
+                    this.x = Math.floor(this.x / CELL_SIZE) * CELL_SIZE + CELL_SIZE / 2;
+                    this.z = Math.floor(this.z / CELL_SIZE) * CELL_SIZE + CELL_SIZE / 2;
+                    
+                    // Try to change to the next direction
+                    const potentialNewPosition = {
+                        x: this.x + this.nextDirection.x * speed,
+                        z: this.z + this.nextDirection.z * speed
+                    };
+                    
+                    const potentialNewCell = {
+                        col: Math.floor(potentialNewPosition.x / CELL_SIZE),
+                        row: Math.floor(potentialNewPosition.z / CELL_SIZE)
+                    };
+                    
+                    // Check if the next direction is valid
+                    if (!isWall(maze, potentialNewCell.row, potentialNewCell.col)) {
+                        this.direction = this.nextDirection;
+                        newX = potentialNewPosition.x;
+                        newZ = potentialNewPosition.z;
+                    } else {
+                        // Choose a new direction based on AI strategy
+                        this.chooseNextDirection(maze, pacman, currentCell);
+                        
+                        // Move in the current direction if valid
+                        if (isWall(maze, nextCell.row, nextCell.col)) {
+                            // Hit a wall, stay in current position
+                            return;
+                        }
+                    }
+                } else {
+                    // If not centered and about to hit a wall, stop
+                    if (isWall(maze, nextCell.row, nextCell.col)) {
+                        // Adjust position to be centered for better navigation
+                        const adjustX = (this.direction.x !== 0);
+                        const adjustZ = (this.direction.z !== 0);
+                        
+                        if (adjustX) {
+                            this.z = Math.floor(this.z / CELL_SIZE) * CELL_SIZE + CELL_SIZE / 2;
+                        }
+                        if (adjustZ) {
+                            this.x = Math.floor(this.x / CELL_SIZE) * CELL_SIZE + CELL_SIZE / 2;
+                        }
+                        
+                        // Choose a new direction
+                        this.chooseNextDirection(maze, pacman, currentCell);
+                        return;
+                    }
+                }
+                
+                // Update eyes direction
+                if (this.direction === DIRECTIONS.UP) this.eyesDirection = DIRECTIONS.UP;
+                else if (this.direction === DIRECTIONS.DOWN) this.eyesDirection = DIRECTIONS.DOWN;
+                else if (this.direction === DIRECTIONS.LEFT) this.eyesDirection = DIRECTIONS.LEFT;
+                else if (this.direction === DIRECTIONS.RIGHT) this.eyesDirection = DIRECTIONS.RIGHT;
+                
+                // Update ghost position
+                this.x = newX;
+                this.z = newZ;
+                
+                // Update mesh position
+                if (this.mesh) {
+                    this.mesh.position.x = this.x;
+                    this.mesh.position.z = this.z;
+                    
+                    // Rotate ghost based on direction
+                    if (this.direction === DIRECTIONS.UP) {
+                        this.mesh.rotation.y = Math.PI;
+                    } else if (this.direction === DIRECTIONS.DOWN) {
+                        this.mesh.rotation.y = 0;
+                    } else if (this.direction === DIRECTIONS.LEFT) {
+                        this.mesh.rotation.y = Math.PI / 2;
+                    } else if (this.direction === DIRECTIONS.RIGHT) {
+                        this.mesh.rotation.y = -Math.PI / 2;
+                    }
+                    
+                    this.updateEyePositions();
+                }
+            }
+            
+            updateEyePositions() {
+                // Update eye and pupil positions based on direction
+                if (!this.eyeMeshes.length || !this.pupilMeshes.length) return;
+                
+                let pupilOffsetX = 0;
+                let pupilOffsetZ = 0;
+                
+                if (this.eyesDirection === DIRECTIONS.UP) {
+                    pupilOffsetZ = -0.05;
+                } else if (this.eyesDirection === DIRECTIONS.DOWN) {
+                    pupilOffsetZ = 0.05;
+                } else if (this.eyesDirection === DIRECTIONS.LEFT) {
+                    pupilOffsetX = -0.05;
+                } else if (this.eyesDirection === DIRECTIONS.RIGHT) {
+                    pupilOffsetX = 0.05;
+                }
+                
+                // Update pupil positions
+                this.pupilMeshes[0].position.x = this.eyeMeshes[0].position.x + pupilOffsetX;
+                this.pupilMeshes[0].position.z = this.eyeMeshes[0].position.z + pupilOffsetZ;
+                
+                this.pupilMeshes[1].position.x = this.eyeMeshes[1].position.x + pupilOffsetX;
+                this.pupilMeshes[1].position.z = this.eyeMeshes[1].position.z + pupilOffsetZ;
+            }
+            
+            chooseNextDirection(maze, pacman, currentCell) {
+                // Don't change direction if in eaten mode and returning to ghost house
+                if (this.mode === 'eaten') {
+                    const ghostHouse = { row: 14, col: 13 };
+                    this.nextDirection = this.getNextDirectionToTarget(maze, currentCell, ghostHouse);
+                    return;
+                }
+                
+                // In frightened mode, choose a random valid direction
+                if (this.mode === 'frightened') {
+                    const validDirections = this.getValidDirections(maze, currentCell);
+                    
+                    // Filter out the opposite of current direction (don't turn back)
+                    const filteredDirections = validDirections.filter(dir => {
+                        return !(
+                            (dir === DIRECTIONS.UP && this.direction === DIRECTIONS.DOWN) ||
+                            (dir === DIRECTIONS.DOWN && this.direction === DIRECTIONS.UP) ||
+                            (dir === DIRECTIONS.LEFT && this.direction === DIRECTIONS.RIGHT) ||
+                            (dir === DIRECTIONS.RIGHT && this.direction === DIRECTIONS.LEFT)
+                        );
+                    });
+                    
+                    // If no valid direction except turning back, allow turning back
+                    const directions = filteredDirections.length > 0 ? filteredDirections : validDirections;
+                    this.nextDirection = directions[Math.floor(Math.random() * directions.length)];
+                    return;
+                }
+                
+                // Get target based on ghost strategy and mode
+                let target;
+                
+                if (this.mode === 'scatter') {
+                    // Scatter mode: head to a corner
+                    if (this.name === 'blinky') target = { row: 0, col: COLS - 1 }; // top-right
+                    else if (this.name === 'pinky') target = { row: 0, col: 0 }; // top-left
+                    else if (this.name === 'inky') target = { row: ROWS - 1, col: COLS - 1 }; // bottom-right
+                    else if (this.name === 'clyde') target = { row: ROWS - 1, col: 0 }; // bottom-left
+                } else {
+                    // Chase mode: use the ghost's specific strategy
+                    const pacmanCell = {
+                        row: Math.floor(pacman.z / CELL_SIZE),
+                        col: Math.floor(pacman.x / CELL_SIZE)
+                    };
+                    
+                    // Enhanced AI strategies for each ghost
+                    if (this.name === 'blinky') {
+                        // Blinky: Aggressive - directly targets Pac-Man with increasing speed at higher levels
+                        target = pacmanCell;
+                        
+                        // Blinky gets faster as dots are collected (Cruise Elroy mode)
+                        const dotsThreshold = Math.max(10, 50 - gameState.level * 5);
+                        if (gameState.remainingDots <= dotsThreshold) {
+                            this.speed = GHOST_SPEED * (1 + 0.05 * (gameState.level + 1));
+                        }
+                    } else if (this.name === 'pinky') {
+                        // Pinky: Ambush - targets 4 tiles ahead of Pac-Man
+                        // Enhanced: Pinky now considers Pac-Man's next likely turn at intersections
+                        
+                        // First, get position 4 tiles ahead
+                        target = {
+                            row: pacmanCell.row + 4 * pacman.direction.z,
+                            col: pacmanCell.col + 4 * pacman.direction.x
+                        };
+                        
+                        // Check if Pac-Man is approaching an intersection
+                        const pacmanNextCell = {
+                            row: pacmanCell.row + pacman.direction.z,
+                            col: pacmanCell.col + pacman.direction.x
+                        };
+                        
+                        // Count possible directions at the next cell
+                        const possibleTurns = this.getValidDirections(maze, pacmanNextCell).length;
+                        
+                        if (possibleTurns > 2) { // It's an intersection (more than just forward and back)
+                            // Try to predict Pac-Man's turn based on dot positions
+                            const potentialTurns = [];
+                            
+                            // Check each direction for dots
+                            [DIRECTIONS.UP, DIRECTIONS.DOWN, DIRECTIONS.LEFT, DIRECTIONS.RIGHT].forEach(dir => {
+                                if (dir !== this.getOppositeDirection(pacman.direction)) {
+                                    const checkCell = {
+                                        row: pacmanNextCell.row + dir.z,
+                                        col: pacmanNextCell.col + dir.x
+                                    };
+                                    
+                                    if (!isWall(maze, checkCell.row, checkCell.col)) {
+                                        // Assign a score based on dots and distance to power pellets
+                                        let score = 0;
+                                        
+                                        // Check for dots in this direction (up to 3 cells ahead)
+                                        for (let i = 1; i <= 3; i++) {
+                                            const checkDotCell = {
+                                                row: pacmanNextCell.row + dir.z * i,
+                                                col: pacmanNextCell.col + dir.x * i
+                                            };
+                                            
+                                            if (hasDot(maze, checkDotCell.row, checkDotCell.col)) {
+                                                score += 10 / i; // Closer dots are worth more
+                                            }
+                                            
+                                            if (hasPowerPellet(maze, checkDotCell.row, checkDotCell.col)) {
+                                                // Power pellets are usually avoided by Pac-Man when ghosts are frightened
+                                                score += gameState.powerPelletActive ? -20 : 30;
+                                            }
+                                        }
+                                        
+                                        potentialTurns.push({ direction: dir, score });
+                                    }
+                                }
+                            });
+                            
+                            // Sort by score and pick the highest
+                            if (potentialTurns.length > 0) {
+                                potentialTurns.sort((a, b) => b.score - a.score);
+                                const predictedDir = potentialTurns[0].direction;
+                                
+                                // Adjust target to be 4 tiles in the predicted direction
+                                target = {
+                                    row: pacmanNextCell.row + 4 * predictedDir.z,
+                                    col: pacmanNextCell.col + 4 * predictedDir.x
+                                };
+                            }
+                        }
+                    } else if (this.name === 'inky') {
+                        // Inky: Patrol - uses both Pac-Man and Blinky's positions
+                        // Enhanced: Inky now uses a more complex flanking strategy
+                        
+                        const blinkyCell = {
+                            row: Math.floor(ghosts[0].z / CELL_SIZE),
+                            col: Math.floor(ghosts[0].x / CELL_SIZE)
+                        };
+                        
+                        // Get position 2 tiles ahead of Pac-Man
+                        const aheadCell = {
+                            row: pacmanCell.row + 2 * pacman.direction.z,
+                            col: pacmanCell.col + 2 * pacman.direction.x
+                        };
+                        
+                        // Calculate vector from Blinky to the position ahead of Pac-Man
+                        const vector = {
+                            row: aheadCell.row - blinkyCell.row,
+                            col: aheadCell.col - blinkyCell.col
+                        };
+                        
+                        // Double the vector to get Inky's target
+                        target = {
+                            row: aheadCell.row + vector.row,
+                            col: aheadCell.col + vector.col
+                        };
+                        
+                        // Additional flanking behavior: if Blinky is close to Pac-Man, try to approach from another side
+                        const blinkyDistance = Math.sqrt(
+                            Math.pow(blinkyCell.row - pacmanCell.row, 2) +
+                            Math.pow(blinkyCell.col - pacmanCell.col, 2)
+                        );
+                        
+                        if (blinkyDistance < 5) {
+                            // Find the direction from Pac-Man to Blinky
+                            const dirToBlinky = {
+                                row: blinkyCell.row - pacmanCell.row,
+                                col: blinkyCell.col - pacmanCell.col
+                            };
+                            
+                            // Target the opposite side
+                            target = {
+                                row: pacmanCell.row - dirToBlinky.row,
+                                col: pacmanCell.col - dirToBlinky.col
+                            };
+                        }
+                    } else if (this.name === 'clyde') {
+                        // Clyde: Random - targets Pac-Man when far, runs away when close
+                        // Enhanced: Clyde now has a more nuanced behavior based on dots and other ghosts
+                        
+                        const distance = Math.sqrt(
+                            Math.pow(currentCell.row - pacmanCell.row, 2) +
+                            Math.pow(currentCell.col - pacmanCell.col, 2)
+                        );
+                        
+                        if (distance > 8) {
+                            // If far from Pac-Man, target him directly
+                            target = pacmanCell;
+                        } else if (distance < 4) {
+                            // If very close, run to scatter corner
+                            target = { row: ROWS - 1, col: 0 };
+                        } else {
+                            // In between, target areas with lots of dots
+                            // Find the quadrant with the most dots
+                            const quadrants = [
+                                { row: ROWS / 4, col: COLS / 4 },       // top-left
+                                { row: ROWS / 4, col: 3 * COLS / 4 },   // top-right
+                                { row: 3 * ROWS / 4, col: COLS / 4 },   // bottom-left
+                                { row: 3 * ROWS / 4, col: 3 * COLS / 4 } // bottom-right
+                            ];
+                            
+                            // Choose a quadrant that's not close to Pac-Man
+                            let bestQuadrant = quadrants[0];
+                            let maxDistance = 0;
+                            
+                            for (const quadrant of quadrants) {
+                                const quadDistance = Math.sqrt(
+                                    Math.pow(quadrant.row - pacmanCell.row, 2) +
+                                    Math.pow(quadrant.col - pacmanCell.col, 2)
+                                );
+                                
+                                if (quadDistance > maxDistance) {
+                                    maxDistance = quadDistance;
+                                    bestQuadrant = quadrant;
+                                }
+                            }
+                            
+                            target = bestQuadrant;
+                        }
+                    }
+                }
+                
+                // Clamp target to valid maze bounds
+                target.row = Math.max(0, Math.min(ROWS - 1, target.row));
+                target.col = Math.max(0, Math.min(COLS - 1, target.col));
+                
+                // Get next direction to target
+                this.nextDirection = this.getNextDirectionToTarget(maze, currentCell, target);
+            }
+            
+            getOppositeDirection(dir) {
+                if (dir === DIRECTIONS.UP) return DIRECTIONS.DOWN;
+                if (dir === DIRECTIONS.DOWN) return DIRECTIONS.UP;
+                if (dir === DIRECTIONS.LEFT) return DIRECTIONS.RIGHT;
+                if (dir === DIRECTIONS.RIGHT) return DIRECTIONS.LEFT;
+                return DIRECTIONS.NONE;
+            }
+            
+            getNextDirectionToTarget(maze, current, target) {
+                // Get all valid directions
+                const validDirections = this.getValidDirections(maze, current);
+                
+                // Filter out the opposite of current direction (don't turn back)
+                const filteredDirections = validDirections.filter(dir => {
+                    return !(
+                        (dir === DIRECTIONS.UP && this.direction === DIRECTIONS.DOWN) ||
+                        (dir === DIRECTIONS.DOWN && this.direction === DIRECTIONS.UP) ||
+                        (dir === DIRECTIONS.LEFT && this.direction === DIRECTIONS.RIGHT) ||
+                        (dir === DIRECTIONS.RIGHT && this.direction === DIRECTIONS.LEFT)
+                    );
+                });
+                
+                // Use filtered directions if available, otherwise use all valid directions
+                const directions = filteredDirections.length > 0 ? filteredDirections : validDirections;
+                
+                // Find the direction that brings us closest to the target
+                let bestDirection = directions[0];
+                let bestDistance = Infinity;
+                
+                for (const dir of directions) {
+                    const newPos = {
+                        row: current.row + dir.z,
+                        col: current.col + dir.x
+                    };
+                    
+                    const distance = Math.sqrt(
+                        Math.pow(newPos.row - target.row, 2) +
+                        Math.pow(newPos.col - target.col, 2)
+                    );
+                    
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        bestDirection = dir;
+                    }
+                }
+                
+                return bestDirection;
+            }
+            
+            getValidDirections(maze, position) {
+                const directions = [];
+                
+                // Check each cardinal direction
+                if (!isWall(maze, position.row - 1, position.col)) directions.push(DIRECTIONS.UP);
+                if (!isWall(maze, position.row + 1, position.col)) directions.push(DIRECTIONS.DOWN);
+                if (!isWall(maze, position.row, position.col - 1)) directions.push(DIRECTIONS.LEFT);
+                if (!isWall(maze, position.row, position.col + 1)) directions.push(DIRECTIONS.RIGHT);
+                
+                return directions;
+            }
+        }
